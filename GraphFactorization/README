@@ -1,0 +1,7 @@
+The folder contains all the gsql scripts and the data to build a movie recommendation system in TigerGraph.
+The data schema, loading jobs and the queries can be created by importing the recommendation-latent-factor-model.tar.gz from TigerGraph GraphStudio.
+More details of the model can be found at 
+https://towardsdatascience.com/how-to-build-a-recommendation-system-in-a-graph-database-using-a-latent-factor-model-fa2d142f874
+The schema locates in recommendation-latent-factor-model/template/ExportedGraph/global.gsql
+The queries and the loading job locate in recommendation-latent-factor-model/template/ExportedGraph/DBImportExport_Recommender.gsql
+The data locates in data/
