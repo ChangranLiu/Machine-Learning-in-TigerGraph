@@ -1,0 +1,228 @@
+set exit_on_error = "false"
+CREATE GRAPH Recommender(USER, MOVIE, rate)
+CREATE LOADING JOB load_job_rating_csv_1582847047282 FOR GRAPH Recommender {
+      DEFINE FILENAME MyDataSource;
+      LOAD MyDataSource TO VERTEX USER VALUES($0, _) USING SEPARATOR=",", HEADER="true", EOL="\n";
+      LOAD MyDataSource TO VERTEX MOVIE VALUES($1, _, _, _) USING SEPARATOR=",", HEADER="true", EOL="\n";
+      LOAD MyDataSource TO EDGE rate VALUES($0, $1, $2, _) USING SEPARATOR=",", HEADER="true", EOL="\n";
+    }
+
+CREATE LOADING JOB load_job_movieList_csv_1582847070454 FOR GRAPH Recommender {
+      DEFINE FILENAME MyDataSource;
+      LOAD MyDataSource TO VERTEX MOVIE VALUES($0, $1, _, _) USING SEPARATOR="#", HEADER="true", EOL="\n";
+    }
+
+CREATE QUERY test(VERTEX<USER> user) FOR GRAPH Recommender { 
+	//This query output the real ratings provided by a user together with the predicted rating by the model 
+	//The query input is a user id
+	//The query output is all the ratings given by the user and the ratings prediction
+  SumAccum<DOUBLE> @predicted_rating;
+	SumAccum<DOUBLE> @real_rating;
+	src = {user};
+	
+	Start = SELECT t FROM src:s -(rate:e)-> MOVIE:t
+	        ACCUM
+	          t.@predicted_rating += dotProduct_List_List(s.theta,t.x)+t.avg_rating,
+	          t.@real_rating += e.rating+t.avg_rating;
+
+	PRINT Start[Start.@real_rating,Start.@predicted_rating];
+}
+CREATE QUERY normalization(/* Parameters here */) FOR GRAPH Recommender { 
+	// This query normalizes the ratings by substracting each rating by the average rating of the movie.
+	// The average rating of each movie is computed from the training data
+  AvgAccum @avg_rating;
+  Start = {MOVIE.*};
+	Start = SELECT s FROM Start:s -(rate:e)-> USER:t
+	        ACCUM
+	          IF e.label THEN
+	            s.@avg_rating += e.rating        
+	          END
+	        POST-ACCUM
+	          s.avg_rating = s.@avg_rating;    // the average rating results are stored on the avg_rating attribute of movie vertices
+
+
+	Start = SELECT s FROM Start:s -(rate:e)-> USER:t
+	        ACCUM
+	          e.rating = e.rating - s.@avg_rating;  //substract each rating by the average rating of the movie
+}
+CREATE QUERY README(/* Parameters here */) FOR GRAPH Recommender { 
+  /* 
+The recommendation system can predict the movie ratings based on the latent factor (model-based) method.
+To train the latent factor model, run the queries below in sequence 
+1. splitData
+2. normalization
+3. initialization
+4. training
+
+To test the model and use it for recommendation, run the queries below
+test
+recommend
+
+To re-train model using different training data split, the data need to be reloaded before repeat the steps above.
+The order of the queries need to be followed to ensure the correctness of the result.
+*/ 
+	
+  PRINT "README works!"; 
+}
+CREATE QUERY splitData() FOR GRAPH Recommender {
+  // This query split rating data into validation set and training set. 
+	// The fraction of testing data is set to be 30%. (i.e. 30% of the rating data will be used for model validation
+	// and the rest 70% will be used for model training).
+	// This query also output the size of total data set, the validation data set and the training data set.
+	SumAccum<INT> @@cnt_total;
+	SumAccum<INT> @@cnt_validation;
+	SumAccum<INT> @@cnt_training;
+	AvgAccum @avg_rating;
+	DOUBLE validationDataFraction = 0.3;  // The fraction of testing data is set to be 30%. 
+	INT remainer;
+	remainer = 100*validationDataFraction;                     // remainer is used for filtering the training data
+	USERs = {USER.*};
+	USERs = SELECT s FROM USERs:s -(rate:e)-> MOVIE:t
+	        ACCUM
+	          @@cnt_total += 1,
+	          IF (getvid(t)+getvid(s)) % 100 < remainer THEN   // select the validation data
+	             e.label = FALSE,                              // set the label of the validation to false (the label of the training data is set as true during loading)
+	             @@cnt_validation += 1
+	          ELSE
+	             e.label = TRUE
+	          END
+	          ;  
+	
+	@@cnt_training = @@cnt_total-@@cnt_validation;
+	PRINT @@cnt_total,@@cnt_validation,@@cnt_training;         // print out the size of total data set, the validation data set and the training data set
+	
+	
+}
+CREATE QUERY initialization(float sdv = 0.1, float mean = 0.1) FOR GRAPH Recommender { 
+	// This query initialize the latent factor vectors for the users and the movies
+	// The elements in the latent factor vectors are initialized by a normal distributed random number generator
+	// The query inputs are the standard deviation and the mean of the normal distribution 
+	
+	ListAccum<DOUBLE> @init;
+	//The length of the latent factor vector (i.e. the number of features) is set as 19. This number has to be the same as the num_latent_factors in the training query
+	INT num_latent_factors = 19; 
+	
+  MOVIEs = {MOVIE.*};
+	MOVIEs = SELECT s FROM MOVIEs:s
+	         ACCUM
+	           FOREACH i IN RANGE[1,num_latent_factors] DO
+	             s.@init += sdv*randn()+mean                // assign the random number to the latent factor vectors of the movies
+	           END
+	         POST-ACCUM
+	           s.x = s.@init;
+
+	USERs = {USER.*};
+	USERs = SELECT s FROM USERs:s
+	        ACCUM
+	           FOREACH i IN RANGE[1,num_latent_factors] DO
+	             s.@init += sdv*randn()+mean                // assign the random number to the latent factor vectors of the users
+	           END
+	        POST-ACCUM
+	          s.theta = s.@init;
+}
+CREATE QUERY recommend(VERTEX<USER> user) FOR GRAPH Recommender {
+	//This query output the top-10 movies recommended to a user
+	//The movies are recommended based on the rating prediction
+	SumAccum<DOUBLE> @predicted_rating;
+	MaxAccum<DOUBLE> @real_rating;
+	
+  MOVIEs = {MOVIE.*};
+	MOVIEs = SELECT s FROM MOVIEs:s
+	        POST-ACCUM
+	          s.@predicted_rating += dotProduct_List_List(user.theta,s.x)+s.avg_rating    //compute the rating prediction based on the model
+	        ORDER BY s.@predicted_rating DESC
+	        LIMIT 10;
+	PRINT "Recommendation (based on model)";
+	PRINT MOVIEs[MOVIEs.name, MOVIEs.@predicted_rating]; 
+}
+CREATE QUERY training(DOUBLE learning_rate = 0.001, DOUBLE regularization_factor = 0.00005, INT Iter=100) FOR GRAPH Recommender {
+	//This query trains the recommender model using gradient descent algorithm 
+	//The number of features is set as 19. This number has to be the same as the num_latent_factors in the initialization query
+	//The query inputs are the learning rate, regularization_factor and the number of training iterations
+	//The query output the root mean square error (RMSE) for each iteration
+	ListAccum<DOUBLE> @tmp;
+	ArrayAccum<SumAccum<double>> @theta[19];     // movie latent factor vector
+	ArrayAccum<SumAccum<double>> @x[19];         // user latent factor vector
+	ArrayAccum<SumAccum<double>> @Gradient[19];  // gradient of the latent factor vector
+	SumAccum<DOUBLE> @@RMSE_training;            // RMSE for the training data
+	SumAccum<DOUBLE> @@RMSE_validation;          // RMSE for the validation data
+	AndAccum @label;
+	
+	//The length of the latent factor vector (i.e. the number of features) is set as 19. This number has to be the same as the num_latent_factors in the initialization query
+  INT num_latent_factors = 19;
+  DOUBLE cnt_training = 69963;  //The size of the training data. This number should be the same as the output of splitData query
+  DOUBLE cnt_validation = 30048;  //The size of the validation data. This number should be the same as the output of splitData query
+
+	// pass x and theta to local accum
+
+	MOVIEs = {MOVIE.*};
+
+	MOVIEs = SELECT s FROM MOVIEs:s
+	         ACCUM
+	           FOREACH i IN RANGE[0,num_latent_factors-1] DO
+	             s.@x[i] += s.x.get(i)
+	           END;
+
+	USERs = {USER.*};
+	USERs = SELECT s FROM USERs:s
+	        ACCUM
+	           FOREACH i IN RANGE[0,num_latent_factors-1] DO
+	             s.@theta[i] += s.theta.get(i)
+	           END;
+
+	// obtain the latent factor vectors using gradient descent algorithm
+	WHILE TRUE LIMIT Iter DO
+	@@RMSE_training = 0;
+	@@RMSE_validation = 0;
+	USERs = SELECT s FROM USERs:s
+	        ACCUM
+	          s.@Gradient.reallocate(num_latent_factors);
+
+  MOVIEs = SELECT s FROM MOVIEs:s
+	        ACCUM
+	          s.@Gradient.reallocate(num_latent_factors);
+
+	USERs = SELECT s FROM USERs:s -(rate:e)-> MOVIE:t
+	        ACCUM
+	          DOUBLE delta = dotProduct_ArrayAccum_ArrayAccum(s.@theta,t.@x),    //The dotProduct_ArrayAccum_ArrayAccum() function return the dot product of two vectors
+	          delta = delta-e.rating,
+	          IF e.label THEN
+	            @@RMSE_training += delta*delta,
+	            s.@Gradient += product_ArrayAccum_const(t.@x,delta),          //The product_ArrayAccum_const() function return the product of a vector and a constant scalar
+	            t.@Gradient += product_ArrayAccum_const(s.@theta,delta)
+	          ELSE
+	            @@RMSE_validation += delta*delta
+	          END
+	        POST-ACCUM
+	          s.@Gradient += product_ArrayAccum_const(s.@theta,regularization_factor),
+	          s.@theta += product_ArrayAccum_const(s.@Gradient,-learning_rate),
+	          t.@Gradient += product_ArrayAccum_const(t.@x,regularization_factor),
+	          t.@x += product_ArrayAccum_const(t.@Gradient,-learning_rate);
+
+  @@RMSE_training = sqrt(@@RMSE_training/cnt_training);
+	@@RMSE_validation = sqrt(@@RMSE_validation/cnt_validation);
+	PRINT @@RMSE_training, @@RMSE_validation;
+
+	END;
+
+
+	// pass local accum to x and theta
+	MOVIEs = SELECT s FROM MOVIEs:s
+	         POST-ACCUM
+	           s.@tmp.clear(),
+	           FOREACH i IN RANGE[0,num_latent_factors-1] DO
+	             s.@tmp += s.@x[i]
+	           END,
+	           s.x = s.@tmp;
+
+
+	USERs = SELECT s FROM USERs:s
+	        POST-ACCUM
+	           s.@tmp.clear(),
+	           FOREACH i IN RANGE[0,num_latent_factors-1] DO
+	             s.@tmp += s.@theta[i]
+	           END,
+	           s.theta = s.@tmp;
+
+}
+set exit_on_error = "true"
