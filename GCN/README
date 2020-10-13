@@ -1,6 +1,6 @@
 The folder contains all the gsql scripts and the data to build a GCN model on a citation graph in TigerGraph.
 The data schema, loading jobs and the queries can be created by importing the GCNonCitationGraph.tar.gz from TigerGraph GraphStudio.
-More details of the model can be found at 
+More details of the GCN model can be found at 
 https://towardsdatascience.com/how-to-train-graph-convolutional-network-models-in-a-graph-database-5c919a2f95d7.
 The schema locates in GCNonCitationGraph/template/ExportedGraph/global.gsql
 The queries and the loading job locate in GCNonCitationGraph/template/ExportedGraph/DBImportExport_CitationGraph.gsql
